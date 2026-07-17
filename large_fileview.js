@@ -111,7 +111,6 @@ const largeFileUpload = {
       statusUrlBase: "/large-file-upload/status",
       cancelUrlBase: "/large-file-upload/cancel",
       fieldId: field.id,
-      folder: attrs?.folder || "/",
       max_file_size_mb: attrs?.max_file_size_mb || 5120,
       chunk_size_mb: attrs?.chunk_size_mb || 8,
       allowed_extensions: attrs?.allowed_extensions || "",

@@ -26,6 +26,7 @@ function largeFileUploadEls(widget) {
 function resetLargeFileUpload(fileInputEl) {
   const widget = fileInputEl.closest(".large-file-upload-widget");
   if (!widget) return;
+  delete widget.dataset.sessionId;
   const els = largeFileUploadEls(widget);
   fileInputEl.value = "";
   if (els.valueInput) els.valueInput.value = "";
@@ -33,6 +34,18 @@ function resetLargeFileUpload(fileInputEl) {
   if (els.progressWrap) els.progressWrap.classList.add("d-none");
   if (els.progressBar) els.progressBar.style.width = "0%";
   if (els.customText) els.customText.textContent = "No file chosen";
+}
+
+// Cancels an in-progress upload this widget actually started, so picking a
+// new file doesn't leave the old one taking up space until it expires.
+function cancelLargeFileUploadSession(widget) {
+  const sessionId = widget.dataset.sessionId;
+  if (!sessionId) return;
+  delete widget.dataset.sessionId;
+  const cfg = JSON.parse(decodeURIComponent(widget.getAttribute("data-cfg")));
+  largeFileUploadXhr("POST", cfg.cancelUrlBase + "/" + sessionId, null).catch(
+    function () {}
+  );
 }
 
 function setLargeFileUploadStatus(widget, msg) {
@@ -89,6 +102,7 @@ function largeFileUploadXhr(method, url, body, onProgress) {
 }
 
 async function startLargeFileUpload(widget, cfg, file) {
+  cancelLargeFileUploadSession(widget);
   const els = largeFileUploadEls(widget);
   const maxBytes = cfg.max_file_size_mb * 1024 * 1024;
   if (file.size > maxBytes) {
@@ -120,17 +134,17 @@ async function startLargeFileUpload(widget, cfg, file) {
   if (els.customText) els.customText.textContent = file.name;
   setLargeFileUploadStatus(widget, "Starting upload…");
   try {
+    const form = widget.closest("form[data-viewname]");
     const startResp = await largeFileUploadXhr("POST", cfg.startUrl, {
       field_id: cfg.fieldId,
+      view_name: form ? form.getAttribute("data-viewname") : "",
       filename: file.name,
       filesize: file.size,
       mimetype: file.type || "application/octet-stream",
-      folder: cfg.folder,
-      max_file_size_mb: cfg.max_file_size_mb,
       chunk_size_mb: cfg.chunk_size_mb,
-      allowed_extensions: cfg.allowed_extensions,
     });
     const sessionId = startResp.sessionId;
+    widget.dataset.sessionId = sessionId;
     const chunkSizeMb = startResp.chunkSizeMb || cfg.chunk_size_mb;
     await uploadLargeFileChunks(widget, sessionId, file, cfg, chunkSizeMb);
     setLargeFileUploadStatus(widget, "Finishing…");
@@ -139,6 +153,7 @@ async function startLargeFileUpload(widget, cfg, file) {
       cfg.finishUrlBase + "/" + sessionId,
       null
     );
+    delete widget.dataset.sessionId;
     if (els.valueInput) els.valueInput.value = finishResp.location;
     setLargeFileUploadStatus(widget, finishResp.filename || file.name);
     setLargeFileUploadProgress(widget, 1);

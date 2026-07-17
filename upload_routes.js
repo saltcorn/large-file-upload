@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const File = require("@saltcorn/data/models/file");
 const Field = require("@saltcorn/data/models/field");
 const Table = require("@saltcorn/data/models/table");
+const View = require("@saltcorn/data/models/view");
 const db = require("@saltcorn/data/db");
 const { getState } = require("@saltcorn/data/db/state");
 
@@ -13,6 +14,7 @@ const MIN_CHUNK_MB = 1;
 const MAX_CHUNK_MB = 64;
 const TMP_DIRNAME = ".large-file-upload-tmp";
 const SESSION_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const MAX_SESSIONS_PER_USER = 25;
 
 // sessionId -> { userId, tenantSchema, folder, filename, declaredSize,
 //                chunkSizeBytes, expectedChunkCount, receivedChunks: Set<number>,
@@ -84,6 +86,19 @@ const startUpload = async (req, res) => {
   const minRoleUpload = getState().getConfig("min_role_upload", 1);
   if (req.user.role_id > +minRoleUpload)
     return res.status(403).json({ error: "Not authorized to upload files" });
+
+  // Cap how many uploads one user can have open at once, so a runaway
+  // client can't pile up unlimited sessions and temp files.
+  let openForUser = 0;
+  for (const session of sessions.values())
+    if (session.userId === req.user.id) openForUser++;
+  if (openForUser >= MAX_SESSIONS_PER_USER)
+    return res
+      .status(429)
+      .json({
+        error: "Too many uploads in progress, finish or cancel one first",
+      });
+
   if (getState().getConfig("storage_s3_enabled", false))
     return res
       .status(400)
@@ -91,8 +106,8 @@ const startUpload = async (req, res) => {
 
   const body = req.body || {};
 
-  // Look up the real field instead of trusting the client, so we can check
-  // its own access role and confirm the user may actually write to it.
+  // Look up the real field, so we can check the user actually has write
+  // access to the table it belongs to.
   const fieldId = Number(body.field_id);
   if (!Number.isInteger(fieldId))
     return res.status(400).json({ error: "Missing field" });
@@ -105,12 +120,25 @@ const startUpload = async (req, res) => {
   if (!table || req.user.role_id > table.min_role_write)
     return res.status(403).json({ error: "Not authorized for this field" });
 
+  // Also look up the view that's actually using this field, so the real
+  // configured limits apply instead of whatever the browser sends.
+  const view = View.findOne({ name: String(body.view_name || "") });
+  const column =
+    view?.table_id === field.table_id &&
+    (view.configuration?.columns || []).find(
+      (c) =>
+        c.type === "Field" &&
+        c.field_name === field.name &&
+        c.fieldview === "Large file upload"
+    );
+  const fieldPolicy = column?.configuration || {};
+
   const declaredSize = Number(body.filesize);
   if (!Number.isFinite(declaredSize) || declaredSize <= 0)
     return res.status(400).json({ error: "Invalid file size" });
 
   const maxFileMb = clamp(
-    Number(body.max_file_size_mb) || ABSOLUTE_MAX_FILE_MB,
+    Number(fieldPolicy.max_file_size_mb) || ABSOLUTE_MAX_FILE_MB,
     1,
     ABSOLUTE_MAX_FILE_MB
   );
@@ -133,16 +161,18 @@ const startUpload = async (req, res) => {
   );
 
   const dirs = await File.allDirectories();
-  const folder = dirs.some((d) => d.path_to_serve === body.folder)
-    ? body.folder
+  const folder = dirs.some((d) => d.path_to_serve === fieldPolicy.folder)
+    ? fieldPolicy.folder
     : "/";
 
   let filename = path
     .basename(String(body.filename || "").trim())
     .replace(/[^\w.\- ]+/g, "_");
-  if (!filename) filename = `upload-${Date.now()}`;
+  // A name made only of dots (".", "..") isn't a real filename, just a
+  // path trick, so treat it the same as an empty one.
+  if (!filename || /^\.+$/.test(filename)) filename = `upload-${Date.now()}`;
 
-  const allowedExts = String(body.allowed_extensions || "")
+  const allowedExts = String(fieldPolicy.allowed_extensions || "")
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
@@ -229,8 +259,6 @@ const finishUpload = async (req, res) => {
   if (session.receivedChunks.size !== session.expectedChunkCount)
     return res.status(400).json({ error: "Upload incomplete" });
 
-  sessions.delete(req.params.sessionId);
-
   const mimetype =
     File.nameToMimeType(session.filename) || "application/octet-stream";
   const [mime_super, mime_sub] = mimetype.split("/");
@@ -239,26 +267,44 @@ const finishUpload = async (req, res) => {
     path.join(session.folder, session.filename),
     true
   );
-  await fsp.mkdir(path.dirname(finalPath), { recursive: true });
-  await fsp.rename(session.tmpPath, finalPath);
 
-  const file = await File.create({
-    filename: session.filename,
-    location: finalPath,
-    uploaded_at: new Date(),
-    size_kb: Math.round(session.declaredSize / 1024),
-    user_id: req.user.id,
-    mime_super,
-    mime_sub,
-    min_role_read: session.minRoleRead,
-    s3_store: false,
-  });
+  // Keep the session until the file is safely stored, so a failure
+  // doesn't leave an untracked, orphaned file behind.
+  let moved = false;
+  try {
+    await fsp.mkdir(path.dirname(finalPath), { recursive: true });
+    await fsp.rename(session.tmpPath, finalPath);
+    moved = true;
 
-  res.json({
-    location: file.field_value,
-    filename: file.filename,
-    url: File.pathToServeUrl(file.field_value, { filename: file.filename }),
-  });
+    const file = await File.create({
+      filename: session.filename,
+      location: finalPath,
+      uploaded_at: new Date(),
+      size_kb: Math.round(session.declaredSize / 1024),
+      user_id: req.user.id,
+      mime_super,
+      mime_sub,
+      min_role_read: session.minRoleRead,
+      s3_store: false,
+    });
+
+    sessions.delete(req.params.sessionId);
+
+    res.json({
+      location: file.field_value,
+      filename: file.filename,
+      url: File.pathToServeUrl(file.field_value, { filename: file.filename }),
+    });
+  } catch (e) {
+    if (moved) {
+      try {
+        await fsp.unlink(finalPath);
+      } catch (unlinkErr) {
+        // already gone
+      }
+    }
+    res.status(500).json({ error: "Could not finish upload" });
+  }
 };
 
 const uploadStatus = async (req, res) => {
