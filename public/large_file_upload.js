@@ -121,6 +121,7 @@ async function startLargeFileUpload(widget, cfg, file) {
   setLargeFileUploadStatus(widget, "Starting upload…");
   try {
     const startResp = await largeFileUploadXhr("POST", cfg.startUrl, {
+      field_id: cfg.fieldId,
       filename: file.name,
       filesize: file.size,
       mimetype: file.type || "application/octet-stream",
@@ -128,10 +129,10 @@ async function startLargeFileUpload(widget, cfg, file) {
       max_file_size_mb: cfg.max_file_size_mb,
       chunk_size_mb: cfg.chunk_size_mb,
       allowed_extensions: cfg.allowed_extensions,
-      min_role_read: cfg.min_role_read,
     });
     const sessionId = startResp.sessionId;
-    await uploadLargeFileChunks(widget, sessionId, file, cfg);
+    const chunkSizeMb = startResp.chunkSizeMb || cfg.chunk_size_mb;
+    await uploadLargeFileChunks(widget, sessionId, file, cfg, chunkSizeMb);
     setLargeFileUploadStatus(widget, "Finishing…");
     const finishResp = await largeFileUploadXhr(
       "POST",
@@ -150,8 +151,14 @@ async function startLargeFileUpload(widget, cfg, file) {
   }
 }
 
-async function uploadLargeFileChunks(widget, sessionId, file, cfg) {
-  const chunkBytes = cfg.chunk_size_mb * 1024 * 1024;
+async function uploadLargeFileChunks(
+  widget,
+  sessionId,
+  file,
+  cfg,
+  chunkSizeMb
+) {
+  const chunkBytes = chunkSizeMb * 1024 * 1024;
   const totalChunks = Math.max(1, Math.ceil(file.size / chunkBytes));
   for (let index = 0; index < totalChunks; index++) {
     const start = index * chunkBytes;

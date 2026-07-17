@@ -3,6 +3,8 @@ const fs = require("fs");
 const fsp = fs.promises;
 const crypto = require("crypto");
 const File = require("@saltcorn/data/models/file");
+const Field = require("@saltcorn/data/models/field");
+const Table = require("@saltcorn/data/models/table");
 const db = require("@saltcorn/data/db");
 const { getState } = require("@saltcorn/data/db/state");
 
@@ -88,6 +90,21 @@ const startUpload = async (req, res) => {
       .json({ error: "Large file upload is not supported with S3 storage" });
 
   const body = req.body || {};
+
+  // Look up the real field instead of trusting the client, so we can check
+  // its own access role and confirm the user may actually write to it.
+  const fieldId = Number(body.field_id);
+  if (!Number.isInteger(fieldId))
+    return res.status(400).json({ error: "Missing field" });
+  const field = await Field.findOne({ id: fieldId });
+  const fieldTypeName =
+    field && (typeof field.type === "string" ? field.type : field.type?.name);
+  if (!field || fieldTypeName !== "File")
+    return res.status(400).json({ error: "Invalid field" });
+  const table = Table.findOne({ id: field.table_id });
+  if (!table || req.user.role_id > table.min_role_write)
+    return res.status(403).json({ error: "Not authorized for this field" });
+
   const declaredSize = Number(body.filesize);
   if (!Number.isFinite(declaredSize) || declaredSize <= 0)
     return res.status(400).json({ error: "Invalid file size" });
@@ -109,7 +126,11 @@ const startUpload = async (req, res) => {
   );
   const chunkSizeBytes = chunkMb * 1024 * 1024;
 
-  const minRoleRead = clamp(Number(body.min_role_read) || 1, 1, 100);
+  const minRoleRead = clamp(
+    Number(field.attributes?.min_role_read) || 1,
+    1,
+    100
+  );
 
   const dirs = await File.allDirectories();
   const folder = dirs.some((d) => d.path_to_serve === body.folder)
