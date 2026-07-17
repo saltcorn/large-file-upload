@@ -5,8 +5,6 @@ const {
   div,
   text,
   text_attr,
-  script,
-  domReady,
 } = require("@saltcorn/markup/tags");
 const File = require("@saltcorn/data/models/file");
 const { getState } = require("@saltcorn/data/db/state");
@@ -21,18 +19,17 @@ const btnStyles = [
   { name: "btn btn-info", label: "Info button" },
 ];
 
-const buildCustomInput = (id, attrs, file_name) =>
+const buildCustomInput = (attrs, file_name) =>
   button(
     {
       type: "button",
-      id: `${id}-custom-button`,
       class: attrs.button_style,
       onclick: `$(this).parent().find('input[type=file]').click()`,
     },
     attrs?.label ? attrs.label : "Choose File"
   ) +
   span(
-    { id: `${id}-custom-text`, class: "custom-file-label ms-2" },
+    { class: "custom-file-label lfu-custom-text ms-2" },
     file_name ? "" : "No file chosen"
   );
 
@@ -63,6 +60,7 @@ const largeFileUpload = {
         type: "Integer",
         required: true,
         default: 8,
+        attributes: { min: 1, max: 64 },
       },
       {
         name: "allowed_extensions",
@@ -92,6 +90,10 @@ const largeFileUpload = {
     ];
   },
 
+  // Built to survive being duplicated by Saltcorn's "add another row"
+  // button: elements are found by class within each widget, not by id,
+  // and the upload logic is wired up once globally (see
+  // large_file_upload.js) instead of per copy.
   run: (nm, file_name, attrs, cls, reqd, field) => {
     if (getState().getConfig("storage_s3_enabled", false)) {
       return div(
@@ -100,9 +102,6 @@ const largeFileUpload = {
       );
     }
     const id = `input${text_attr(nm)}`;
-    const valueId = `${id}__value`;
-    const progressId = `${id}__progress`;
-    const statusId = `${id}__status`;
     const customInput = attrs?.button_style && attrs.button_style !== "default";
 
     const cfg = {
@@ -111,47 +110,50 @@ const largeFileUpload = {
       finishUrlBase: "/large-file-upload/finish",
       statusUrlBase: "/large-file-upload/status",
       cancelUrlBase: "/large-file-upload/cancel",
-      folder: attrs?.folder || "/",
+      fieldId: field.id,
       max_file_size_mb: attrs?.max_file_size_mb || 5120,
       chunk_size_mb: attrs?.chunk_size_mb || 8,
       allowed_extensions: attrs?.allowed_extensions || "",
-      min_role_read: +field.attributes?.min_role_read || 1,
     };
 
-    return (
+    return div(
+      {
+        class: "large-file-upload-widget",
+        "data-cfg": encodeURIComponent(JSON.stringify(cfg)),
+      },
       input({
         type: "hidden",
         name: text_attr(nm),
-        id: valueId,
+        id,
+        class: "lfu-value-input",
         "data-fieldname": field.form_name,
         value: file_name || "",
       }) +
-      input({
-        type: "file",
-        id,
-        class: ["form-control", cls, customInput && "d-none"],
-        disabled: attrs.disabled,
-        readonly: attrs.readonly,
-        "data-on-cloned": "resetLargeFileUpload(this)",
-      }) +
-      (customInput ? buildCustomInput(id, attrs, file_name) : "") +
-      div(
-        {
-          class: "progress mt-1 d-none",
-          style: "height: 6px;",
-          id: progressId,
-        },
-        div({ class: "progress-bar", role: "progressbar", style: "width: 0%" })
-      ) +
-      span(
-        { class: "large-file-upload-status ms-2", id: statusId },
-        file_name ? text(file_name) : ""
-      ) +
-      script(
-        domReady(
-          `initLargeFileUpload(${JSON.stringify(id)}, ${JSON.stringify(cfg)})`
+        input({
+          type: "file",
+          class: [
+            "form-control",
+            "lfu-file-input",
+            cls,
+            customInput && "d-none",
+          ],
+          disabled: attrs.disabled,
+          readonly: attrs.readonly,
+          "data-on-cloned": "resetLargeFileUpload(this)",
+        }) +
+        (customInput ? buildCustomInput(attrs, file_name) : "") +
+        div(
+          { class: "progress mt-1 d-none lfu-progress", style: "height: 6px;" },
+          div({
+            class: "progress-bar",
+            role: "progressbar",
+            style: "width: 0%",
+          })
+        ) +
+        span(
+          { class: "large-file-upload-status lfu-status ms-2" },
+          file_name ? text(file_name) : ""
         )
-      )
     );
   },
 };

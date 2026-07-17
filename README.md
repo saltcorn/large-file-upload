@@ -14,5 +14,8 @@ to the file that was already uploaded.
   server restart. Abandoned uploads are cleaned up automatically after a few hours.
 - Who can access an uploaded file afterward follows the same "Role required to access
   added files" setting as any other File field (defaults to admin-only if not set).
-- Requires the user to be logged in with a role allowed to upload files (same setting
-  used by Saltcorn's built-in file uploads).
+- Requires the user to be logged in, with a role allowed to upload files at all (same
+  setting used by Saltcorn's built-in file uploads) and with write access to the table
+  the field belongs to.
+- The site-wide upload size/timeout settings used by Saltcorn's own file uploads don't
+  apply here; this fieldview has its own separate size limit instead.

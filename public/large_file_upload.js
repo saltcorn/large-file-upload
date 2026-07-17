@@ -1,46 +1,60 @@
-const _largeFileUploadState = {};
+// One global listener for all widgets, so copies made by "add another
+// row" work too (a per-widget listener wouldn't carry over to a copy).
+document.addEventListener("change", function (e) {
+  const fileInput = e.target;
+  if (!fileInput.classList || !fileInput.classList.contains("lfu-file-input"))
+    return;
+  const widget = fileInput.closest(".large-file-upload-widget");
+  const file = fileInput.files && fileInput.files[0];
+  if (!widget || !file) return;
+  const cfg = JSON.parse(decodeURIComponent(widget.getAttribute("data-cfg")));
+  startLargeFileUpload(widget, cfg, file);
+});
 
-function largeFileUploadEls(id) {
+function largeFileUploadEls(widget) {
+  const progressWrap = widget.querySelector(".lfu-progress");
   return {
-    fileInput: document.getElementById(id),
-    valueInput: document.getElementById(id + "__value"),
-    progressWrap: document.getElementById(id + "__progress"),
-    progressBar: document
-      .getElementById(id + "__progress")
-      ?.querySelector(".progress-bar"),
-    status: document.getElementById(id + "__status"),
-    customText: document.getElementById(id + "-custom-text"),
+    fileInput: widget.querySelector(".lfu-file-input"),
+    valueInput: widget.querySelector(".lfu-value-input"),
+    progressWrap,
+    progressBar: progressWrap && progressWrap.querySelector(".progress-bar"),
+    status: widget.querySelector(".lfu-status"),
+    customText: widget.querySelector(".lfu-custom-text"),
   };
 }
 
 function resetLargeFileUpload(fileInputEl) {
-  const id = fileInputEl.id;
-  const els = largeFileUploadEls(id);
+  const widget = fileInputEl.closest(".large-file-upload-widget");
+  if (!widget) return;
+  delete widget.dataset.sessionId;
+  const els = largeFileUploadEls(widget);
   fileInputEl.value = "";
   if (els.valueInput) els.valueInput.value = "";
   if (els.status) els.status.textContent = "";
   if (els.progressWrap) els.progressWrap.classList.add("d-none");
   if (els.progressBar) els.progressBar.style.width = "0%";
   if (els.customText) els.customText.textContent = "No file chosen";
-  delete _largeFileUploadState[id];
 }
 
-function initLargeFileUpload(id, cfg) {
-  const fileInput = document.getElementById(id);
-  if (!fileInput) return;
-  fileInput.addEventListener("change", function () {
-    const file = fileInput.files && fileInput.files[0];
-    if (file) startLargeFileUpload(id, cfg, file);
-  });
+// Cancels an in-progress upload this widget actually started, so picking a
+// new file doesn't leave the old one taking up space until it expires.
+function cancelLargeFileUploadSession(widget) {
+  const sessionId = widget.dataset.sessionId;
+  if (!sessionId) return;
+  delete widget.dataset.sessionId;
+  const cfg = JSON.parse(decodeURIComponent(widget.getAttribute("data-cfg")));
+  largeFileUploadXhr("POST", cfg.cancelUrlBase + "/" + sessionId, null).catch(
+    function () {}
+  );
 }
 
-function setLargeFileUploadStatus(id, msg) {
-  const els = largeFileUploadEls(id);
+function setLargeFileUploadStatus(widget, msg) {
+  const els = largeFileUploadEls(widget);
   if (els.status) els.status.textContent = msg;
 }
 
-function setLargeFileUploadProgress(id, fraction) {
-  const els = largeFileUploadEls(id);
+function setLargeFileUploadProgress(widget, fraction) {
+  const els = largeFileUploadEls(widget);
   if (!els.progressWrap || !els.progressBar) return;
   els.progressWrap.classList.remove("d-none");
   const pct = Math.max(0, Math.min(100, Math.round(fraction * 100)));
@@ -87,8 +101,9 @@ function largeFileUploadXhr(method, url, body, onProgress) {
   });
 }
 
-async function startLargeFileUpload(id, cfg, file) {
-  const els = largeFileUploadEls(id);
+async function startLargeFileUpload(widget, cfg, file) {
+  cancelLargeFileUploadSession(widget);
+  const els = largeFileUploadEls(widget);
   const maxBytes = cfg.max_file_size_mb * 1024 * 1024;
   if (file.size > maxBytes) {
     notifyAlert({
@@ -117,47 +132,53 @@ async function startLargeFileUpload(id, cfg, file) {
     }
   }
   if (els.customText) els.customText.textContent = file.name;
-  setLargeFileUploadStatus(id, "Starting upload…");
+  setLargeFileUploadStatus(widget, "Starting upload…");
   try {
+    const form = widget.closest("form[data-viewname]");
     const startResp = await largeFileUploadXhr("POST", cfg.startUrl, {
+      field_id: cfg.fieldId,
+      view_name: form ? form.getAttribute("data-viewname") : "",
       filename: file.name,
       filesize: file.size,
       mimetype: file.type || "application/octet-stream",
-      folder: cfg.folder,
-      max_file_size_mb: cfg.max_file_size_mb,
       chunk_size_mb: cfg.chunk_size_mb,
-      allowed_extensions: cfg.allowed_extensions,
-      min_role_read: cfg.min_role_read,
     });
     const sessionId = startResp.sessionId;
-    _largeFileUploadState[id] = { sessionId, file, cfg };
-    await uploadLargeFileChunks(id, sessionId, file, cfg);
-    setLargeFileUploadStatus(id, "Finishing…");
+    widget.dataset.sessionId = sessionId;
+    const chunkSizeMb = startResp.chunkSizeMb || cfg.chunk_size_mb;
+    await uploadLargeFileChunks(widget, sessionId, file, cfg, chunkSizeMb);
+    setLargeFileUploadStatus(widget, "Finishing…");
     const finishResp = await largeFileUploadXhr(
       "POST",
       cfg.finishUrlBase + "/" + sessionId,
       null
     );
+    delete widget.dataset.sessionId;
     if (els.valueInput) els.valueInput.value = finishResp.location;
-    setLargeFileUploadStatus(id, finishResp.filename || file.name);
-    setLargeFileUploadProgress(id, 1);
+    setLargeFileUploadStatus(widget, finishResp.filename || file.name);
+    setLargeFileUploadProgress(widget, 1);
     if (els.customText)
       els.customText.textContent = finishResp.filename || file.name;
     notifyAlert({ type: "success", text: "File uploaded", remove_delay: 3 });
   } catch (e) {
     notifyAlert({ type: "danger", text: "Upload failed: " + e.message });
-    setLargeFileUploadStatus(id, "Upload failed");
+    setLargeFileUploadStatus(widget, "Upload failed");
   }
 }
 
-async function uploadLargeFileChunks(id, sessionId, file, cfg) {
-  const chunkBytes = cfg.chunk_size_mb * 1024 * 1024;
+async function uploadLargeFileChunks(
+  widget,
+  sessionId,
+  file,
+  cfg,
+  chunkSizeMb
+) {
+  const chunkBytes = chunkSizeMb * 1024 * 1024;
   const totalChunks = Math.max(1, Math.ceil(file.size / chunkBytes));
   for (let index = 0; index < totalChunks; index++) {
     const start = index * chunkBytes;
     const end = Math.min(file.size, start + chunkBytes);
     const blob = file.slice(start, end);
-    const sentBeforeThisChunk = start;
     let attempt = 0;
     for (;;) {
       try {
@@ -168,18 +189,18 @@ async function uploadLargeFileChunks(id, sessionId, file, cfg) {
           function (evt) {
             if (!evt.lengthComputable) return;
             setLargeFileUploadProgress(
-              id,
-              (sentBeforeThisChunk + evt.loaded) / file.size
+              widget,
+              (start + evt.loaded) / file.size
             );
           }
         );
-        setLargeFileUploadProgress(id, end / file.size);
+        setLargeFileUploadProgress(widget, end / file.size);
         break;
       } catch (e) {
         attempt++;
         if (attempt > 5) throw e;
         setLargeFileUploadStatus(
-          id,
+          widget,
           "Retrying chunk " + (index + 1) + "/" + totalChunks + "…"
         );
         await new Promise(function (r) {
